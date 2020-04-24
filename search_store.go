@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-chef/chef"
+	"github.com/chef/go-chef"
 	"github.com/hashicorp/vault/sdk/logical"
 )
 

@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"strings"
 
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 
-	"github.com/go-chef/chef"
+	"github.com/chef/go-chef"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 )
@@ -22,6 +28,10 @@ func pathLogin(b *backend) []*framework.Path {
 		"private_key": {
 			Type:        framework.TypeString,
 			Description: "The private key, can be often found at /etc/chef/client.pem.",
+		},
+		"signed_string": {
+			Type:        framework.TypeString,
+			Description: "A string signed by the node's private key.",
 		},
 	}
 	callbks := map[logical.Operation]framework.OperationFunc{
@@ -40,7 +50,7 @@ func pathLogin(b *backend) []*framework.Path {
 	}
 }
 
-func (b *backend) Login(ctx context.Context, req *logical.Request, nodeName, privateKey string) (*logical.Response, error) {
+func (b *backend) Login(ctx context.Context, req *logical.Request, nodeName, privateKey, signedString string) (*logical.Response, error) {
 	l := b.Logger().With("node_name", nodeName, "request", req.ID)
 
 	l.Info("login attempt", "node_name", nodeName)
@@ -64,15 +74,59 @@ func (b *backend) Login(ctx context.Context, req *logical.Request, nodeName, pri
 		return nil, err
 	}
 
+	chefUserName := nodeName
+
+	if privateKey == "" {
+		privateKey = conf.PrivateKeyPem
+		chefUserName = conf.UserName
+	}
+
 	client, err := chef.NewClient(&chef.Config{
-		Name:    nodeName,
-		Key:     privateKey,
+		Name:    chefUserName,
+		Key:	 privateKey,
 		BaseURL: conf.Host,
 		SkipSSL: true,
 		Timeout: 10,
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if signedString != "" {
+		nodeClient, err := client.Clients.Get(nodeName)
+		if err != nil {
+			l.Error("error getting client info from chef", "client", nodeClient, "error", err)
+			return nil, logical.ErrPermissionDenied
+		}
+
+		clientPubKey := []byte(nodeClient.PublicKey)
+		block, _ := pem.Decode(clientPubKey)
+		if block == nil || block.Type != "PUBLIC KEY" {
+			l.Error("failed to decode PEM block containing chef client public key")
+			return nil, err
+		}
+		parsedClientPubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			l.Error("error parsing chef client public key:", err)
+			return nil, err
+		}
+		validClientPubKey, _ := parsedClientPubKey.(*rsa.PublicKey)
+
+		decodedSignedString, err := base64.StdEncoding.DecodeString(signedString)
+		if err != nil {
+			l.Error("error decoding signed string:", err)
+			return nil, err
+		}
+
+		hashedSignedMessage := sha256.Sum256([]byte(nodeName))
+
+		err = rsa.VerifyPKCS1v15(validClientPubKey, crypto.SHA256, hashedSignedMessage[:], decodedSignedString)
+		if err != nil {
+			l.Error("error verificating client:", err)
+			return nil, err
+		} else {
+			l.Info("client verification successful")
+		}
 	}
 
 	node, err := client.Nodes.Get(nodeName)
@@ -212,11 +266,12 @@ func (b *backend) pathAuthLogin(ctx context.Context, req *logical.Request, d *fr
 	}
 
 	privateKey := d.Get("private_key").(string)
-	if privateKey == "" {
-		return logical.ErrorResponse("no private key provided"), nil
+	signedString := d.Get("signed_string").(string)
+	if privateKey == "" && signedString == "" {
+		return logical.ErrorResponse("no private key or signed string provided"), nil
 	}
 
-	return b.Login(ctx, req, nodeName, privateKey)
+	return b.Login(ctx, req, nodeName, privateKey, signedString)
 }
 
 func (b *backend) pathAuthRenew(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -236,9 +291,14 @@ func (b *backend) pathAuthRenew(ctx context.Context, req *logical.Request, d *fr
 	if ok {
 		privateKey = privateKeyRaw.(string)
 	}
-	if privateKey == "" {
-		return logical.ErrorResponse("no private key found"), nil
+	signedStringRaw, ok := req.Auth.InternalData["signed_string"]
+	var signedString string
+	if ok {
+		signedString = signedStringRaw.(string)
+	}
+	if privateKey == "" && signedString == "" {
+		return logical.ErrorResponse("no private key or signed string`` found"), nil
 	}
 
-	return b.Login(ctx, req, nodeName, privateKey)
+	return b.Login(ctx, req, nodeName, privateKey, signedString)
 }

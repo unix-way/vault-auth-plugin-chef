@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"fmt"
@@ -14,6 +15,8 @@ import (
 type config struct {
 	Host            string        `json:"host"`
 	DefaultPolicies []string      `json:"default_policies"`
+	UserName        string        `json:"user_name"`
+	PrivateKeyPem   string        `json:"private_key_pem"`
 	DefaultTTL      time.Duration `json:"default_ttl" structs:"default_ttl" mapstructure:"default_ttl"`
 	DefaultMaxTTL   time.Duration `json:"default_max_ttl" structs:"default_max_ttl" mapstructure:"default_max_ttl"`
 	DefaultPeriod   time.Duration `json:"default_period" structs:"default_period" mapstructure:"default_period"`
@@ -26,6 +29,14 @@ func pathConfig(b *backend) *framework.Path {
 			"host": {
 				Type:        framework.TypeString,
 				Description: "Host must be a host string, a host:port pair, or a URL to the base of the Chef server.",
+			},
+			"user_name": {
+				Type:        framework.TypeString,
+				Description: "Name of a user allowed to retrieve node information from the Chef server.",
+			},
+			"private_key_pem": {
+				Type:        framework.TypeString,
+				Description: "Private key, in PEM format, of a user allowed to retrieve node information from the Chef server.",
 			},
 			"default_policies": {
 				Type:        framework.TypeStringSlice,
@@ -43,12 +54,16 @@ func pathConfig(b *backend) *framework.Path {
 func (b *backend) pathConfigWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	policies := d.Get("default_policies").([]string)
 	host := d.Get("host").(string)
+	user := d.Get("user_name").(string)
+	private_key := d.Get("private_key_pem").(string)
 	if host == "" {
 		return logical.ErrorResponse("no host provided"), nil
 	}
 	config := &config{
 		Host:            host,
 		DefaultPolicies: policies,
+		UserName:        user,
+		PrivateKeyPem:   private_key,
 	}
 	entry, err := logical.StorageEntryJSON("config", config)
 	if err != nil {
@@ -71,7 +86,7 @@ func (b *backend) pathConfigRead(ctx context.Context, req *logical.Request, d *f
 
 	raw, err := req.Storage.Get(ctx, "config")
 	if err != nil {
-		b.Logger().Error("error occured while fetching chef host config: %s", err)
+		b.Logger().Error("error occured while fetching chef auth plugin config: %s", err)
 		return logical.ErrorResponse(fmt.Sprintf("Error while fetching config : %s", err)), err
 	}
 	if raw == nil {
@@ -86,6 +101,8 @@ func (b *backend) pathConfigRead(ctx context.Context, req *logical.Request, d *f
 		resp := &logical.Response{
 			Data: map[string]interface{}{
 				"host": conf.Host,
+				"user_name": conf.UserName,
+				"private_key_pem": strings.Split(conf.PrivateKeyPem, "\n")[0],
 			},
 		}
 
